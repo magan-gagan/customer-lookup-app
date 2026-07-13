@@ -166,6 +166,40 @@ def detect_phone_columns(header_row):
     return matches
 
 
+def index_records(records, sheet_name, tab_name, index):
+    """Scan parsed records for phone numbers and add matches to index (in place)."""
+    if not records:
+        return 0
+    header_row = list(records[0].keys())
+    phone_cols = detect_phone_columns(header_row)
+    rows_scanned = 0
+
+    for row_num, row in enumerate(records, start=2):  # row 1 is header
+        rows_scanned += 1
+        candidate_values = []
+        if phone_cols:
+            candidate_values = [row.get(c) for c in phone_cols]
+        else:
+            candidate_values = [v for v in row.values() if looks_like_phone_value(v)]
+
+        seen_numbers = set()
+        for val in candidate_values:
+            norm = normalize_phone(val)
+            if norm and norm not in seen_numbers:
+                seen_numbers.add(norm)
+                index.setdefault(norm, []).append({
+                    "sheet_name": sheet_name,
+                    "tab_name": tab_name,
+                    "row_number": row_num,
+                    "row_data": row,
+                })
+    return rows_scanned
+
+
+def quote_sheet_title(title):
+    return "'" + str(title).replace("'", "''") + "'"
+
+
 def build_index(progress_callback=None):
     """
     Returns:
@@ -197,44 +231,42 @@ def build_index(progress_callback=None):
             errors.append((name, f"Could not list tabs: {e}"))
             continue
 
-        for ws in worksheet_list:
-            total_tabs += 1
-            time.sleep(1.1)  # pace requests to stay under Google's per-minute quota
-            try:
-                raw_values = retry_with_backoff(ws.get_all_values)
-                records = build_safe_records(raw_values)
-            except Exception as e:
-                errors.append((f"{name} / {ws.title}", f"Could not read tab: {e}"))
-                continue
+        if not worksheet_list:
+            continue
 
-            if not records:
-                continue
+        # Try to fetch every tab of this spreadsheet in ONE request instead of
+        # one request per tab -- much faster and uses far less of the quota.
+        batch_ok = False
+        try:
+            time.sleep(0.3)
+            ranges = [quote_sheet_title(ws.title) for ws in worksheet_list]
+            result = retry_with_backoff(sh.values_batch_get, ranges)
+            value_ranges = result.get("valueRanges", [])
+            if len(value_ranges) == len(worksheet_list):
+                for ws, vr in zip(worksheet_list, value_ranges):
+                    total_tabs += 1
+                    raw_values = vr.get("values", [])
+                    try:
+                        records = build_safe_records(raw_values)
+                    except Exception as e:
+                        errors.append((f"{name} / {ws.title}", f"Could not parse tab: {e}"))
+                        continue
+                    total_rows += index_records(records, name, ws.title, index)
+                batch_ok = True
+        except Exception:
+            batch_ok = False  # fall back to per-tab reads below
 
-            header_row = list(records[0].keys())
-            phone_cols = detect_phone_columns(header_row)
-
-            for row_num, row in enumerate(records, start=2):  # row 1 is header
-                total_rows += 1
-
-                # Collect candidate phone values: prefer header-matched columns,
-                # fall back to scanning any cell that looks like a phone number.
-                candidate_values = []
-                if phone_cols:
-                    candidate_values = [row.get(c) for c in phone_cols]
-                else:
-                    candidate_values = [v for v in row.values() if looks_like_phone_value(v)]
-
-                seen_numbers = set()
-                for val in candidate_values:
-                    norm = normalize_phone(val)
-                    if norm and norm not in seen_numbers:
-                        seen_numbers.add(norm)
-                        index.setdefault(norm, []).append({
-                            "sheet_name": name,
-                            "tab_name": ws.title,
-                            "row_number": row_num,
-                            "row_data": row,
-                        })
+        if not batch_ok:
+            for ws in worksheet_list:
+                total_tabs += 1
+                time.sleep(1.1)  # pace requests to stay under Google's per-minute quota
+                try:
+                    raw_values = retry_with_backoff(ws.get_all_values)
+                    records = build_safe_records(raw_values)
+                except Exception as e:
+                    errors.append((f"{name} / {ws.title}", f"Could not read tab: {e}"))
+                    continue
+                total_rows += index_records(records, name, ws.title, index)
 
     stats = {
         "sheets_registered": len(registry),
