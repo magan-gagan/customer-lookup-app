@@ -222,7 +222,9 @@ def build_index(progress_callback=None):
         try:
             sh = retry_with_backoff(client.open_by_url, entry["sheet_url"])
         except Exception as e:
-            errors.append((name, f"Could not open sheet: {e}"))
+            err_type = type(e).__name__
+            err_msg = str(e).strip() or "(no message returned)"
+            errors.append((name, f"Could not open sheet [{err_type}]: {err_msg} | URL used: {entry['sheet_url']}"))
             continue
 
         try:
