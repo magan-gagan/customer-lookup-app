@@ -65,6 +65,36 @@ def retry_with_backoff(func, *args, max_retries=6, base_delay=5, **kwargs):
             raise
 
 
+def build_safe_records(raw_values):
+    """Take raw sheet values (list of lists, first row = header) and build
+    row dicts, tolerating blank or duplicate header names by renaming them
+    uniquely (e.g. two 'Installation' columns -> 'Installation' and
+    'Installation_2'; blank headers -> 'Column_N')."""
+    if not raw_values:
+        return []
+
+    raw_header = raw_values[0]
+    seen = {}
+    clean_header = []
+    for i, col in enumerate(raw_header):
+        col = str(col).strip()
+        if not col:
+            col = f"Column_{i + 1}"
+        if col in seen:
+            seen[col] += 1
+            col = f"{col}_{seen[col]}"
+        else:
+            seen[col] = 1
+        clean_header.append(col)
+
+    records = []
+    for row in raw_values[1:]:
+        # Pad short rows so zip doesn't silently drop trailing columns
+        padded = row + [""] * (len(clean_header) - len(row))
+        records.append(dict(zip(clean_header, padded)))
+    return records
+
+
 def get_client():
     # When deployed on Streamlit Community Cloud, credentials are stored in
     # st.secrets instead of a local file (since credentials.json can't be
@@ -171,7 +201,8 @@ def build_index(progress_callback=None):
             total_tabs += 1
             time.sleep(1.1)  # pace requests to stay under Google's per-minute quota
             try:
-                records = retry_with_backoff(ws.get_all_records)
+                raw_values = retry_with_backoff(ws.get_all_values)
+                records = build_safe_records(raw_values)
             except Exception as e:
                 errors.append((f"{name} / {ws.title}", f"Could not read tab: {e}"))
                 continue
