@@ -66,6 +66,27 @@ def retry_with_backoff(func, *args, max_retries=6, base_delay=5, **kwargs):
 
 
 def get_client():
+    # When deployed on Streamlit Community Cloud, credentials are stored in
+    # st.secrets instead of a local file (since credentials.json can't be
+    # safely committed to GitHub). Fall back to the local file for
+    # running on your own machine.
+    try:
+        import streamlit as st
+        has_secrets = hasattr(st, "secrets") and len(st.secrets) > 0
+    except Exception:
+        has_secrets = False
+
+    if has_secrets:
+        if "gcp_service_account" not in st.secrets:
+            raise RuntimeError(
+                "Streamlit secrets are configured but no [gcp_service_account] "
+                "section was found. Check Settings -> Secrets on your deployed "
+                "app and confirm the section header and all fields are present."
+            )
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+        return gspread.authorize(creds)
+
     creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
     return gspread.authorize(creds)
 
